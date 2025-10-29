@@ -11,83 +11,109 @@ def get_page_html(form_data):
         DB, "SELECT name, student_number FROM TeamMember ORDER BY name;"
     )
 
+    # Map persona roles (or names) → destination page
+    role_links = {
+        "policymaker": "/b2",   # compare by economic status
+        "journalist":  "/b3",   # global vs above-average comparison
+        "researcher":  "/b3",
+        "epidemiologist": "/b3",
+        "student": "/b2",
+    }
+
+    def _link_for(role_or_name: str):
+        if not role_or_name:
+            return None
+        key = role_or_name.strip().lower()
+        # try exact, then contains match (e.g., "Health Journalist")
+        for k, href in role_links.items():
+            if k == key or k in key:
+                return href
+        return None
+
     h = []
     h.append("""<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><title>Sub-Task B — Level 1 (Mission)</title>
 <style>
-  :root { --line:#d7d7d7; --text:#111; --muted:#555; --boxbg:#fafafa; }
-  body{font-family:Segoe UI,Arial,sans-serif;margin:24px;line-height:1.5;color:var(--text)}
+  /* ===== Vibrant look & feel ===== */
+  :root {
+    --ink:#0b1220; --muted:#5b6476; --line:#e6e9f2;
+    --card:#ffffff; --bg:#f7f9ff;
+    --accent:#6c5ce7; --accent-2:#22c55e; --accent-3:#ef4444; --accent-4:#06b6d4;
+  }
+  html,body{height:100%}
+  body{
+    font-family:Segoe UI,system-ui,Arial,sans-serif; margin:0;
+    color:var(--ink); line-height:1.6;
+    background: radial-gradient(1200px 800px at 0% -10%, #eef2ff 0%, #f7f9ff 55%, #ffffff 100%);
+  }
+  main{max-width:1060px;margin:28px auto;padding:0 20px}
+
   h1,h2{margin:0 0 12px 0}
   .muted{color:var(--muted)}
-  .card{border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0;background:#fff}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}
 
-  /* persona tiles */
-  .persona-box{
-     border:10px solid var(--text); background:var(--boxbg);
-     height:150px; display:flex; align-items:center; justify-content:center;
-     font-weight:700; font-size:18px; letter-spacing:.3px; border-radius:6px;
-     transition:background .15s, border-color .15s, transform .05s;
-  }
-  .persona-box, .persona-box:link, .persona-box:visited { color:inherit; text-decoration:none; }
-  .persona-box:hover { background:#f0f0f0; border-color:#555; }
-  .persona-box:active { transform:scale(0.99); }
-
-  /* team table */
-  table{border-collapse:collapse;width:100%;background:#fff}
-  th,td{border-bottom:1px solid var(--line);text-align:left;padding:10px}
-  th{background:#f4f4f4}
-
-  /* --- Hero Mission Section --- */
-  .card.hero{
-    position:relative;
-    text-align:center;
-    border-radius:18px;
-    padding:50px 40px;
-    border:1px solid #e6e6e6;
-    background:linear-gradient(180deg,#ffffff 0%, #f8f9ff 100%);
-    box-shadow:0 8px 25px rgba(0,0,0,0.05);
-  }
-  .card.hero::before{
-    content:"";
-    position:absolute; inset:0 0 auto 0; height:6px;
-    border-top-left-radius:18px; border-top-right-radius:18px;
-    background:linear-gradient(90deg,#2563eb,#7c3aed 60%,#e11d48);
+  .card{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:16px; padding:18px; margin:14px 0;
+    box-shadow:0 8px 24px rgba(16,24,40,.04);
   }
 
+  /* --- Hero --- */
+  .hero{
+    position:relative; overflow:hidden;
+    padding:46px 36px 38px; text-align:center;
+    background:
+      radial-gradient(1200px 400px at 50% -10%, rgba(108,92,231,.18), transparent 60%),
+      linear-gradient(180deg, #ffffff 0%, #f7f7ff 100%);
+    border:1px solid #eae9ff;
+  }
+  .hero::before{
+    content:""; position:absolute; inset:0 0 auto 0; height:6px;
+    background:linear-gradient(90deg, var(--accent), #8b5cf6 35%, #22c55e 65%, #06b6d4 100%);
+  }
   .section-label{
-    display:inline-block;
-    font-size:36px; font-weight:700; letter-spacing:.4px;
-    color:#334155; background:#f1f5f9;
-    padding:6px 12px; border-radius:999px; border:1px solid #e2e8f0;
-    margin-bottom:14px;
+    display:inline-block; font-size:14px; font-weight:700; letter-spacing:.4px;
+    color:#334155; background:#eef2ff; padding:6px 12px; border-radius:999px;
+    border:1px solid #dbe1ff; margin-bottom:14px; text-transform:uppercase;
+  }
+  .hero h1{font-size:34px; line-height:1.25; margin:0 auto 12px; max-width:900px}
+  .hero p.lead{font-size:18px; max-width:880px; margin:0 auto 20px; color:#1f2937}
+
+  .actions{margin-top:10px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap}
+  .btn{
+    display:inline-block; padding:12px 16px; border-radius:12px; font-weight:700;
+    text-decoration:none; border:1px solid #cdd4ff; background:#fff; color:#0f172a;
+    transition:transform .06s, box-shadow .18s, border-color .18s, background .18s;
+  }
+  .btn:hover{box-shadow:0 10px 20px rgba(17,24,39,.08); border-color:#a9b6ff}
+  .btn:active{transform:translateY(1px)}
+
+  /* --- Persona grid --- */
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px}
+  .persona-box{
+    border:2px solid #cfd5ff; background:linear-gradient(180deg, #ffffff 0%, #fbfbff 100%);
+    min-height:120px; display:flex; align-items:center; justify-content:center; text-align:center;
+    font-weight:800; font-size:18px; letter-spacing:.2px; border-radius:14px;
+    transition:transform .06s, box-shadow .18s, border-color .18s, background .18s, color .18s;
+    color:#1c2434; text-decoration:none;
+  }
+  .persona-box:hover{
+    transform:translateY(-1px);
+    box-shadow:0 10px 22px rgba(17,24,39,.08);
+    border-color:#a9b6ff; background:linear-gradient(180deg, #ffffff 0%, #eef2ff 100%);
+  }
+  .persona-box.linked{
+    border-color:#86efac;
+  }
+  .persona-box.linked:hover{
+    border-color:#22c55e; color:#064e3b;
+    background:linear-gradient(180deg,#ffffff 0%, #eafff3 100%);
   }
 
-  .hero h1{
-    font-size:36px;
-    line-height:1.3;
-    color:#0f172a;
-    margin:0 auto 14px;
-    max-width:900px;
-  }
-  .hero p.lead{
-    color:#1e293b;
-    font-size:18px;
-    max-width:850px;
-    margin:0 auto 24px;
-    line-height:1.6;
-  }
-
-  .hero .actions{ margin-top:10px; display:flex; justify-content:center; gap:12px; flex-wrap:wrap }
-  .hero .btn{
-    display:inline-block; padding:12px 18px; border-radius:12px;
-    border:1px solid #cbd5e1; text-decoration:none; font-weight:600;
-    background:#fff; color:#0f172a;
-    transition:transform .05s, box-shadow .15s, border-color .15s;
-  }
-  .hero .btn:hover{ box-shadow:0 6px 14px rgba(0,0,0,0.06); border-color:#94a3b8 }
-  .hero .btn:active{ transform:scale(.98) }
-
+  /* Team table */
+  table{border-collapse:collapse;width:100%}
+  thead th{background:#f3f5ff}
+  th,td{border-bottom:1px solid var(--line);text-align:left;padding:10px}
 </style>
 </head>
 <body>""")
@@ -102,7 +128,7 @@ def get_page_html(form_data):
     <span class="section-label" id="mission-heading">Mission Statement</span>
     <h1>Help diverse users explore unbiased vaccination &amp; infection data.</h1>
     <p class="lead">
-      We present respectful, neutral information and let users examine patterns by economic status, region, and time — 
+      We present respectful, neutral information and let users examine patterns by economic status, region, and time —
       offering both quick summaries and deeper analysis so anyone can become well-informed about global immunisation efforts and their impacts.
     </p>
     <div class="actions" aria-label="Quick links">
@@ -116,11 +142,10 @@ def get_page_html(form_data):
     <h2 id="howto-heading">How to use this site</h2>
     <ol>
       <li>Open <a href="/b2">B2 — Focused view by economic status</a>. Choose an
-          <em>economic phase</em>, <em>infection type</em>, and <em>year</em>, then view
-          per-country <b>cases per 100,000 people</b>.</li>
-      <li>Open <a href="/b3">B3 — Above-average view</a>. See the <b>global infection rate</b>
-          for your chosen disease/year, then compare countries that exceed that benchmark (global
-          row shown first).</li>
+          <em>economic phase</em>, <em>infection type</em>, and <em>year</em>, then view per-country
+          <b>cases per 100,000 people</b>.</li>
+      <li>Open <a href="/b3">B3 — Above-average view</a>. See the <b>global infection rate</b> for your chosen disease/year,
+          then compare countries that exceed that benchmark (global row shown first).</li>
       <li>Return here any time to review the Personas we target and your team details stored in the database.</li>
     </ol>
   </div>
@@ -135,11 +160,10 @@ def get_page_html(form_data):
         for (name, role, goals) in personas:
             title = (role or name or "User")
             title_txt = (title or "").replace('"', '&quot;')
-            is_policymaker = (title or "").strip().lower() == "policymaker" \
-                             or (name or "").strip().lower() == "policymaker" \
-                             or (role or "").strip().lower() == "policymaker"
-            if is_policymaker:
-                h.append(f'<a href="/b2" class="persona-box" aria-label="Open B2 for Policymaker">{title_txt}</a>')
+            # pick link by role or by name
+            link = _link_for(role) or _link_for(name)
+            if link:
+                h.append(f'<a href="{link}" class="persona-box linked" aria-label="Open {link} for {title_txt}">{title_txt}</a>')
             else:
                 h.append(f'<div class="persona-box">{title_txt}</div>')
     else:
