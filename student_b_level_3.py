@@ -1,235 +1,262 @@
 import pyhtml
-from navigation import build_nav, nav_styles  # keep
+from navigation import build_nav, nav_styles
 
 DB = "database/immunisation.db"
 
-def _safe(s: str) -> str:
+# ---------- helpers ----------
+def _safe(s): 
     return str(s).replace("'", "''") if s is not None else ""
 
 def _qs(form_data, key, default=None):
-    """Return single value from parse_qs dict; fall back to default."""
     v = form_data.get(key, default)
     if isinstance(v, list):
         v = v[0] if v else default
-    return v if v is not None and v != "" else default
+    return default if v in (None, "") else v
 
+def _opts(sql):
+    return [r[0] for r in pyhtml.get_results_from_query(DB, sql)]
+
+def _opt_html(options, selected, placeholder=None):
+    out = []
+    if placeholder is not None:
+        sel = " selected" if selected in (None, "", placeholder) else ""
+        out.append(f'<option value=""{sel}>{placeholder}</option>')
+    for v in options:
+        sel = " selected" if str(v) == str(selected) else ""
+        out.append(f'<option value="{v}"{sel}>{v}</option>')
+    return "".join(out)
+
+def _fmt_num(x, digits=2):
+    return "—" if x is None else f"{float(x):.{digits}f}"
+
+# ---------- page ----------
 def get_page_html(form_data):
-    # --- Load dropdown options ---
-    diseases = [row[0] for row in pyhtml.get_results_from_query(
-        DB, "SELECT DISTINCT description FROM Infection_Type ORDER BY description;"
-    )]
-    years = [row[0] for row in pyhtml.get_results_from_query(
-        DB, "SELECT DISTINCT year FROM InfectionData ORDER BY year;"
-    )]
+    # dropdown data
+    diseases = _opts("SELECT DISTINCT description FROM Infection_Type ORDER BY description;")
+    years    = _opts("SELECT DISTINCT year FROM InfectionData ORDER BY year;")
+    phases   = _opts("SELECT DISTINCT phase FROM Economy ORDER BY phase;")
 
     # sensible defaults
     default_disease = diseases[0] if diseases else "Measles"
     default_year    = years[-1] if years else 2020
-    default_sort    = "per100k_desc"
 
-    # unwrap parse_qs lists into single values
+    # GET params
     sel_disease = _qs(form_data, "disease", default_disease)
     sel_year    = _qs(form_data, "year",    default_year)
-    sel_sort    = _qs(form_data, "sort",    default_sort)
+    sel_phase   = _qs(form_data, "phase",   "")      # optional
+    sel_sort    = _qs(form_data, "sort",    "per100k_desc")
+    compare     = _qs(form_data, "cmp",     "above") # above | below | all
+    topn        = _qs(form_data, "topn",    "50")    # string; cast later
 
-    # --- NEW: Clear button handling (same idea as Level 2) ---
+    # Clear -> blank selections (prevents query run)
     if _qs(form_data, "clear", "0") == "1":
-        sel_disease = ""
-        sel_year = ""     # blanking these prevents the query from running
+        sel_disease, sel_year, sel_phase = "", "", ""
 
-    # sanitize/cast for SQL
-    sel_disease_q = _safe(sel_disease)
+    # sanitize / cast
+    disease_q = _safe(sel_disease)
+    phase_q   = _safe(sel_phase) if sel_phase else ""
     try:
-        sel_year_q = int(sel_year)   # keep year numeric in SQL
-    except (TypeError, ValueError):
-        sel_year_q = int(default_year) if sel_year != "" else None
-    sel_sort_q = _safe(sel_sort)
+        year_q = int(sel_year) if sel_year != "" else None
+    except ValueError:
+        year_q = None
+    try:
+        topn_q = max(1, min(500, int(topn)))
+    except ValueError:
+        topn_q = 50
 
-    # --- ORDER BY builder (use only output column names; valid for UNION) ---
-    if sel_sort_q == "country_asc":
+    # order by
+    if sel_sort == "country_asc":
         order_by = "ORDER BY sort_key ASC, country ASC, per_100k DESC"
-    elif sel_sort_q == "phase_asc":
+    elif sel_sort == "phase_asc":
         order_by = "ORDER BY sort_key ASC, economic_phase ASC, country ASC"
-    else:  # default: per100k_desc
+    else:
         order_by = "ORDER BY sort_key ASC, per_100k DESC, country ASC"
 
-    # --- Single SQL (CTEs) ---
+    # compare relation
+    if compare == "below":
+        rel = "<"
+    elif compare == "all":
+        rel = "IS NOT NULL"  # will be handled specially
+    else:
+        rel = ">"
+
+    # build SQL only when required inputs exist
     rows = []
-    if sel_disease and sel_year:  # only run when both present (mirrors Level 2 behaviour)
-        year_clause = f"AND id.year = {sel_year_q}"
+    summary = {"global_rate": None, "matched": 0, "compare": compare}
+    if sel_disease and year_q is not None:
+        phase_clause = f" AND e.phase = '{phase_q}'" if phase_q else ""
         sql = f"""
 WITH base AS (
   SELECT
     c.CountryID,
     c.name AS country,
-    e.phase AS economic_phase,
+    COALESCE(e.phase,'') AS economic_phase,
     it.description AS infection_type,
     id.year,
     id.cases,
     cp.population
   FROM InfectionData id
-  JOIN Country c            ON c.CountryID = id.country
-  JOIN Infection_Type it    ON it.id = id.inf_type
+  JOIN Country c         ON c.CountryID = id.country
+  JOIN Infection_Type it ON it.id       = id.inf_type
   LEFT JOIN CountryPopulation cp
-                            ON cp.country = c.CountryID AND cp.year = id.year
-  LEFT JOIN Economy e       ON e.economyID = c.economy
-  WHERE it.description = '{sel_disease_q}' {year_clause}
+                         ON cp.country = c.CountryID AND cp.year = id.year
+  LEFT JOIN Economy e    ON e.economyID = c.economy
+  WHERE it.description = '{disease_q}' AND id.year = {year_q} {phase_clause}
 ),
 rates AS (
   SELECT
     country, economic_phase, infection_type, year, cases, population,
-    CASE
-      WHEN cases IS NOT NULL AND population IS NOT NULL AND population > 0
-        THEN (cases * 100000.0) / population
+    CASE WHEN population IS NOT NULL AND population > 0 AND cases IS NOT NULL
+      THEN (cases * 100000.0) / population
       ELSE NULL
     END AS per_100k
   FROM base
 ),
 global_rate AS (
-  SELECT
-    MAX(infection_type) AS infection_type,
-    MAX(year) AS year,
-    (SUM(COALESCE(cases,0)) * 100000.0) / NULLIF(SUM(NULLIF(population,0)),0) AS global_per_100k
+  SELECT 
+    (SUM(COALESCE(cases,0)) * 100000.0) / NULLIF(SUM(NULLIF(population,0)),0) AS g
   FROM rates
 )
-SELECT
-  'Global' AS country,
-  NULL     AS economic_phase,
-  g.infection_type,
-  g.year,
-  ROUND(g.global_per_100k, 2) AS per_100k,
-  0 AS sort_key
+SELECT 'Global' AS country, NULL AS economic_phase, '{disease_q}' AS infection_type,
+       {year_q} AS year, ROUND(g.g,2) AS per_100k, 0 AS sort_key
 FROM global_rate g
-
 UNION ALL
-
-SELECT
-  r.country,
-  r.economic_phase,
-  r.infection_type,
-  r.year,
-  ROUND(r.per_100k, 2) AS per_100k,
-  1 AS sort_key
+SELECT r.country, r.economic_phase, r.infection_type, r.year,
+       ROUND(r.per_100k,2) AS per_100k, 1 AS sort_key
 FROM rates r
 CROSS JOIN global_rate g
 WHERE r.per_100k IS NOT NULL
-  AND g.global_per_100k IS NOT NULL
-  AND r.per_100k > g.global_per_100k
-{order_by};
+""" + (
+    "" if compare == "all" else f"  AND r.per_100k {rel} g.g\n"
+) + f"""{order_by}
+LIMIT {topn_q + 1}; -- +1 because we include the Global row
 """
         rows = pyhtml.get_results_from_query(DB, sql)
 
-    # --- HTML ---
+        # compute summary
+        if rows:
+            # first row is global
+            try:
+                summary["global_rate"] = rows[0][4]
+            except Exception:
+                summary["global_rate"] = None
+            summary["matched"] = max(0, len(rows) - 1)
+
+    # -------------- HTML --------------
     h = []
     h.append("""<!DOCTYPE html><html lang="en"><head>
-<meta charset="utf-8"><title>Sub-Task B — Level 3 (Above Global)</title>
+<meta charset="utf-8"><title>Sub-Task B — Level 3 (Above / Below Global)</title>
 <style>
-  :root { --line:#d7d7d7; --text:#111; --muted:#555; --box:#fafafa; }
-  body{font-family:Segoe UI,Arial,sans-serif;margin:24px;line-height:1.5;color:var(--text)}
-  .card{border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0;background:#fff}
-  form{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:8px 0 16px}
-  label{font-size:.95rem}
+  :root { --line:#d7d7d7; --ink:#0f172a; --muted:#6b7280; --pill:#eef2ff; }
+  html,body{background:#f8fafc; color:var(--ink); font-family:Segoe UI,Arial,sans-serif}
+  main{max-width:1100px; margin:24px auto; padding:0 16px}
+  .card{background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; margin:12px 0}
   .muted{color:var(--muted)}
-  input,select,button{padding:6px 10px}
+  form{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:8px 0 8px}
+  label{font-size:.95rem}
+  select,input,button{padding:8px 10px; border-radius:10px; border:1px solid #cbd5e1}
+  button{cursor:pointer; background:#fff}
+  .actions{display:flex; gap:8px; flex-wrap:wrap}
   table{width:100%;border-collapse:collapse}
-  th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left}
-  tr.global{background:#fff7cc;font-weight:600}
-
-  /* --- Navigation card styling (same as Level 1) --- */
-  .nav-card h2{ margin-bottom:8px }
-  .nav-card nav{ display:flex; flex-wrap:wrap; gap:10px }
-  .nav-card nav a{
-    display:inline-block; padding:8px 12px; border-radius:12px;
-    border:1px solid var(--line); background:#fff; text-decoration:none; color:inherit;
-    transition:background .12s, border-color .12s, transform .05s;
-  }
-  .nav-card nav a:hover{ background:#f8fafc; border-color:#94a3b8 }
-  .nav-card nav a[aria-current="page"], .nav-card nav a.active{
-    background:#0f172a; color:#fff; border-color:#0f172a;
-  }
+  th,td{border-bottom:1px solid #eef2f7; padding:10px; text-align:left}
+  thead th{background:#f1f5f9}
+  tr.global{background:#fff7cc; font-weight:600}
+  tr:nth-child(even):not(.global){background:#fcfcff}
+  .pill{display:inline-block; padding:4px 10px; border-radius:999px; background:var(--pill); border:1px solid #e2e8f0; font-weight:600}
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px}
 </style>
-</head><body>""")
-
-    # Shared nav CSS
-    h.append(nav_styles())
-
-    # --- Top Navigation (same component as Level 1) ---
-    h.append("""
+</head><body>
 <main>
-  <div class="card nav-card" role="region" aria-labelledby="nav-heading">
-    <h2 id="nav-heading">Navigation</h2>
 """)
+
+    # Top shared nav
+    h.append(nav_styles())
     h.append(build_nav("b3", "B"))
-    h.append("</div>")  # close top nav
 
-    # --- Page content ---
+    # Header + form
     h.append("""
-  <div class="card">
-    <h1>Above-average infection rate</h1>
-    <p class="muted">Select a year and infection type. The global infection rate (per 100,000 people) is shown as the first row, followed by countries above that global average.</p>
-    <form method="get" action="/b3">
-      <label>Infection type
-        <select name="disease">""")
-
-    for d in diseases:
-        sel = " selected" if str(d) == str(sel_disease) else ""
-        h.append(f'<option value="{d}"{sel}>{d}</option>')
-
+<div class="card">
+  <h1>Global benchmark comparison</h1>
+  <p class="muted">See countries whose infection rate is <b>above</b> or <b>below</b> the global average for a selected disease and year. Optionally filter by economic phase.</p>
+  <form method="get" action="/b3">
+    <label>Infection type
+      <select name="disease">""")
+    h.append(_opt_html(diseases, sel_disease))
     h.append("""</select></label>
-      <label>Year
-        <select name="year">""")
 
-    for y in years:
-        sel = " selected" if str(y) == str(sel_year) else ""
-        h.append(f'<option value="{y}"{sel}>{y}</option>')
-
+    <label>Year
+      <select name="year">""")
+    h.append(_opt_html(years, sel_year))
     h.append("""</select></label>
-      <label>Sort
-        <select name="sort">
-          <option value="per100k_desc"{0}>Per-100k (high→low)</option>
-          <option value="country_asc"{1}>Country (A–Z)</option>
-          <option value="phase_asc"{2}>Economic phase (A–Z)</option>
-        </select>
-      </label>
+
+    <label>Economic phase
+      <select name="phase">""")
+    h.append(_opt_html(phases, sel_phase, placeholder="All phases"))
+    h.append("""</select></label>
+
+    <label>Compare
+      <select name="cmp">
+        <option value="above"{0}>Above global</option>
+        <option value="below"{1}>Below global</option>
+        <option value="all"{2}>All (show global + all countries)</option>
+      </select>
+    </label>
+
+    <label>Sort
+      <select name="sort">
+        <option value="per100k_desc"{3}>Per-100k (high→low)</option>
+        <option value="country_asc"{4}>Country (A–Z)</option>
+        <option value="phase_asc"{5}>Economic phase (A–Z)</option>
+      </select>
+    </label>
+
+    <label>Top-N
+      <input type="number" min="1" max="500" name="topn" value="{6}" />
+    </label>
+
+    <div class="actions">
       <button type="submit">Update</button>
-      <!-- NEW: Clear button to mirror Level 2 -->
       <button type="submit" name="clear" value="1">Clear</button>
-    </form>
-  </div>
+    </div>
+  </form>
+</div>
 """.format(
+        " selected" if compare == "above" else "",
+        " selected" if compare == "below" else "",
+        " selected" if compare == "all"   else "",
         " selected" if sel_sort == "per100k_desc" else "",
-        " selected" if sel_sort == "country_asc" else "",
-        " selected" if sel_sort == "phase_asc" else "",
+        " selected" if sel_sort == "country_asc"  else "",
+        " selected" if sel_sort == "phase_asc"    else "",
+        topn_q
     ))
 
-    # Table
+    # Summary panel
+    h.append('<div class="card"><div class="grid">')
+    h.append(f'<div><div class="pill">Global rate</div><p style="margin:.4rem 0 0">{_fmt_num(summary["global_rate"])}</p></div>')
+    label = {"above":"Countries above", "below":"Countries below", "all":"Countries listed"}[compare]
+    h.append(f'<div><div class="pill">{label}</div><p style="margin:.4rem 0 0">{summary["matched"]}</p></div>')
+    phase_text = sel_phase if sel_phase else "All phases"
+    h.append(f'<div><div class="pill">Phase filter</div><p style="margin:.4rem 0 0">{phase_text}</p></div>')
+    h.append('</div></div>')
+
+    # Results table
     h.append('<div class="card" role="region" aria-labelledby="results-heading">')
     h.append('<h2 id="results-heading">Results</h2>')
-    h.append('<div class="table-wrap"><table aria-label="Countries above global infection rate"><thead><tr>')
+    h.append('<div class="table-wrap"><table aria-label="Global comparison results"><thead><tr>')
     h.append('<th>Country</th><th>Economic phase</th><th>Infection</th><th>Year</th><th>Per 100,000</th>')
     h.append('</tr></thead><tbody>')
 
     if rows:
         for country, phase, disease, year, per100k, _ in rows:
             tr_class = ' class="global"' if country == "Global" else ""
-            phase_txt = phase if phase is not None else "—"
-            per_txt = "—" if per100k is None else f"{per100k:.2f}"
-            h.append(f"<tr{tr_class}><td>{country}</td><td>{phase_txt}</td><td>{disease}</td><td>{year}</td><td>{per_txt}</td></tr>")
+            phase_txt = phase if phase not in (None, "") else "—"
+            h.append(f"<tr{tr_class}><td>{country}</td><td>{phase_txt}</td><td>{disease}</td><td>{year}</td><td>{_fmt_num(per100k)}</td></tr>")
     else:
         h.append('<tr><td colspan="5" class="muted">No data for this selection.</td></tr>')
 
     h.append("</tbody></table></div></div>")
 
-    # --- Bottom Navigation (same component as Level 1) ---
-    h.append("""
-  <div class="card nav-card" role="region" aria-labelledby="bottom-nav-heading" style="margin-top:24px;">
-    <h2 id="bottom-nav-heading">Navigation</h2>
-""")
+    # Bottom nav
     h.append(build_nav("b3", "B"))
-    h.append("""
-  </div>
-
-</main>
-</body></html>""")
-
+    h.append("</main></body></html>")
     return "".join(h)
