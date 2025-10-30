@@ -1,5 +1,5 @@
 import pyhtml
-from navigation import build_nav, nav_styles   # ⬅️ add this
+from navigation import build_nav, nav_styles   
 
 DB = "database/immunisation.db"
 
@@ -107,3 +107,4 @@ def get_page_html(form_data):
 
     h.append('<p><a href="/b1">Back to B: Level 1</a></p></body></html>')
     return "".join(h)
+
