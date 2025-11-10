@@ -1,4 +1,5 @@
 import pyhtml
+from navigation import build_nav, nav_styles   
 
 DB = "database/immunisation.db"
 
@@ -68,24 +69,6 @@ def get_page_html(form_data):
             margin-bottom: 25px;
             font-size: 2.5em;
             font-weight: 600;
-        }
-
-        nav {
-            margin-bottom: 30px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid #e5e7eb;
-        }
-        nav a {
-            margin-right: 12px;
-            text-decoration: none;
-            color: #4b5563;
-            font-size: 0.95em;
-            padding: 4px 0;
-            transition: color 0.15s;
-        }
-        nav a:hover {
-            color: #007bff;
-            text-decoration: underline;
         }
 
         .card {
@@ -178,19 +161,17 @@ def get_page_html(form_data):
             background-color: #eef2ff;
             color: #007bff;
         }
-            
     </style>
 </head>
 <body>
     <div class="container">
-    <nav>
-        <a href="/">A: Level 1</a>
-        <a href="/page2" style="color: #007bff; font-weight: 600;">A: Level 2</a>
-        <a href="/page3">A: Level 3</a>
-        <a href="/b1">B: Level 1</a>
-        <a href="/b2">B: Level 2</a>
-    </nav>
+""")
 
+    # ✅ Shared top navigation (consistent on every page)
+    h.append(nav_styles())
+    h.append(build_nav("a2"))
+
+    h.append("""
     <h1>Vaccination Coverage by Country</h1>
     <p>Select an <b>Antigen</b> and <b>Year</b> to view coverage by country.</p>
 
@@ -239,4 +220,3 @@ def get_page_html(form_data):
 """)
 
     return "".join(h)
-
