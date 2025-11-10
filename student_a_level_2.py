@@ -30,7 +30,13 @@ def get_page_html(form_data):
         FROM Vaccination
         WHERE antigen = '{sel_antigen}'
           AND year = CAST('{sel_year}' AS INTEGER)
-        ORDER BY coverage DESC;
+        ORDER BY
+            CASE
+                WHEN coverage IS NULL OR CAST(coverage AS REAL) = 0 THEN 1  -- push N/A/0 to bottom
+                ELSE 0
+            END,
+            CAST(coverage AS REAL) DESC,
+            country ASC;  
         """
         rows = pyhtml.get_results_from_query(DB, sql)
         print("DEBUG rows returned:", len(rows))
